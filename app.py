@@ -13,7 +13,7 @@ app = Flask(__name__)
 app.config.from_object(Config)
 
 db.init_app(app)
-CORS(app)  # permite que a app web (noutro domínio) fale com esta API
+CORS(app, supports_credentials=True, origins=["http://localhost:5173"])
 swagger = Swagger(app, template={
     "info": {
         "title": "API ARSM",
