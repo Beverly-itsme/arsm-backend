@@ -1,9 +1,12 @@
-from flask import Flask, request, jsonify
+from functools import wraps
+
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from flasgger import Swagger
+from werkzeug.security import check_password_hash
 
 from config import Config
-from models import db, Utilizador, Avaliacao, RespostaItem
+from models import db, Utilizador, Avaliacao, RespostaItem, Administrador
 from scoring import processar_avaliacao_completa
 
 app = Flask(__name__)
@@ -198,5 +201,128 @@ def health_check():
     return jsonify({"estado": "operacional"}), 200
 
 
+
+
+# ---------------------------------------------------------------------------
+# Sprint 6 — Área de administração
+# ---------------------------------------------------------------------------
+
+def requer_admin(f):
+    """Decorador: bloqueia o acesso a quem não fez login como admin (RF17)."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("admin_id"):
+            return jsonify({"erro": "Acesso não autorizado. Faz login primeiro."}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
+    """
+    Login do administrador.
+    ---
+    tags:
+      - Admin
+    parameters:
+      - in: body
+        name: body
+        schema:
+          type: object
+          required: [username, password]
+          properties:
+            username:
+              type: string
+            password:
+              type: string
+    responses:
+      200:
+        description: Login bem-sucedido
+      401:
+        description: Credenciais inválidas
+    """
+    dados = request.get_json() or {}
+    username = dados.get("username")
+    password = dados.get("password")
+
+    admin = Administrador.query.filter_by(username=username).first()
+    if not admin or not check_password_hash(admin.password_hash, password):
+        return jsonify({"erro": "Utilizador ou palavra-passe incorretos."}), 401
+
+    session["admin_id"] = admin.id
+    return jsonify({"mensagem": "Login efetuado com sucesso."}), 200
+
+
+@app.route("/api/admin/logout", methods=["POST"])
+def admin_logout():
+    """
+    Termina a sessão do administrador.
+    ---
+    tags:
+      - Admin
+    responses:
+      200:
+        description: Sessão terminada
+    """
+    session.pop("admin_id", None)
+    return jsonify({"mensagem": "Sessão terminada."}), 200
+
+
+@app.route("/api/admin/estatisticas", methods=["GET"])
+@requer_admin
+def admin_estatisticas():
+    """
+    Devolve estatísticas agregadas e anonimizadas (RF18).
+    Nunca devolve respostas individuais associadas a uma pessoa (RF19).
+    ---
+    tags:
+      - Admin
+    responses:
+      200:
+        description: Estatísticas agregadas
+      401:
+        description: Não autenticado
+    """
+    total_utilizadores = Utilizador.query.count()
+    total_avaliacoes = Avaliacao.query.count()
+    total_risco_urgente = Avaliacao.query.filter_by(risco_urgente=True).count()
+
+    distribuicao_phq9 = {}
+    for categoria in ["mínimo", "leve", "moderado", "moderadamente severo", "severo"]:
+        distribuicao_phq9[categoria] = Avaliacao.query.filter_by(
+            categoria_risco_phq9=categoria
+        ).count()
+
+    distribuicao_gad7 = {}
+    for categoria in ["mínimo", "leve", "moderado", "severo"]:
+        distribuicao_gad7[categoria] = Avaliacao.query.filter_by(
+            categoria_risco_gad7=categoria
+        ).count()
+
+    avaliacoes = Avaliacao.query.all()
+    if avaliacoes:
+        media_phq9 = sum(a.pontuacao_phq9 for a in avaliacoes) / len(avaliacoes)
+        media_gad7 = sum(a.pontuacao_gad7 for a in avaliacoes) / len(avaliacoes)
+    else:
+        media_phq9 = media_gad7 = 0
+
+    distribuicao_idade = {}
+    utilizadores = Utilizador.query.all()
+    for u in utilizadores:
+        faixa = u.faixa_etaria or "não especificado"
+        distribuicao_idade[faixa] = distribuicao_idade.get(faixa, 0) + 1
+
+    return jsonify({
+        "total_utilizadores": total_utilizadores,
+        "total_avaliacoes": total_avaliacoes,
+        "total_risco_urgente": total_risco_urgente,
+        "media_pontuacao_phq9": round(media_phq9, 1),
+        "media_pontuacao_gad7": round(media_gad7, 1),
+        "distribuicao_risco_phq9": distribuicao_phq9,
+        "distribuicao_risco_gad7": distribuicao_gad7,
+        "distribuicao_faixa_etaria": distribuicao_idade,
+    }), 200
+
+
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000, host="0.0.0.0")
